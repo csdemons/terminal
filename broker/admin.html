@@ -32,6 +32,10 @@ main { padding: 20px 24px 40px; max-width: 1400px; margin: 0 auto; }
 .stat b { display: block; font-size: 24px; font-variant-numeric: tabular-nums; }
 .stat span { color: var(--muted); font-size: 12px; }
 h2 { font-size: 15px; margin: 24px 0 10px; }
+.pool { margin-bottom: 18px; }
+.pool-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin: 0 0 8px; }
+.pool-head h3 { margin: 0; font-size: 14px; }
+.pool-head span { color: var(--muted); font-size: 12px; }
 .nodes { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }
 .node { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; }
 .node.offline { border-color: var(--bad); }
@@ -107,17 +111,18 @@ td.r-ok { color: var(--ok); }
 <section id="tab-farm">
   <div class="summary" id="summary"></div>
 
-  <h2>Узлы</h2>
-  <div class="nodes" id="nodes"></div>
+  <h2>Пулы и узлы</h2>
+  <div id="nodes"></div>
 
   <h2>Сессии</h2>
   <div class="panel">
     <div class="toolbar">
       <input id="q" type="search" placeholder="Пользователь, узел или IP">
+      <select id="poolFilter"><option value="">Все пулы</option></select>
       <label><input type="checkbox" id="onlyLost"> только на недоступных узлах</label>
     </div>
     <div class="scroll"><table>
-      <thead><tr><th>Пользователь</th><th>Узел</th><th>Статус</th><th>Начата</th>
+      <thead><tr><th>Пользователь</th><th>Пул</th><th>Узел</th><th>Статус</th><th>Начата</th>
         <th>Активность</th><th>Клиент</th><th>Сессия</th><th></th></tr></thead>
       <tbody id="sessions"></tbody>
     </table></div>
@@ -180,7 +185,8 @@ function ago(ts) {
 }
 function x2goTime(t) {           // "2026-11-16T21:30:12" из базы x2go
   if (!t) return "—";
-  return t.replace("T", " ").slice(0, 16);
+  const m = /^(\d{4})-(\d\d)-(\d\d)[T ](\d\d:\d\d)/.exec(t);
+  return m ? `${m[3]}.${m[2]} ${m[4]}` : t;
 }
 function gb(b) { return b ? (b / 1073741824).toFixed(0) + " ГБ" : "—"; }
 function hhmm(ts) {
@@ -256,7 +262,15 @@ function render() {
     [lost, "на недоступных узлах"],
   ].map(([v, l]) => `<div class="stat"><b>${esc(v)}</b><span>${esc(l)}</span></div>`).join("");
 
-  $("nodes").innerHTML = s.nodes.map((n) => {
+  const poolName = Object.fromEntries(s.pools.map((p) => [p.id, p.name]));
+  const pf = $("poolFilter");
+  if (pf.options.length !== s.pools.length + 1) {
+    const cur = pf.value;
+    pf.innerHTML = `<option value="">Все пулы</option>` +
+      s.pools.map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join("");
+    pf.value = cur;
+  }
+  const nodeCard = (n) => {
     const [cls, label] = nodeStatus(n);
     const used = n.sessions_total + n.reserved;
     const memUsed = n.mem_total ? 1 - n.mem_avail / n.mem_total : 0;
@@ -276,12 +290,22 @@ function render() {
         ? `<button data-a="undrain" data-h="${esc(n.host)}">Вернуть в работу</button>`
         : `<button data-a="drain" data-h="${esc(n.host)}">Вывести на обслуживание</button>`}</div>` : ""}
     </div>`;
+  };
+  const byHost = Object.fromEntries(s.nodes.map((n) => [n.host, n]));
+  $("nodes").innerHTML = s.pools.map((p) => {
+    const st = p.online < p.total ? (p.online ? "warn" : "bad") : "ok";
+    return `<div class="pool"><div class="pool-head"><h3>${esc(p.name)}</h3>
+      <span class="pill ${st}">${p.online} / ${p.total} в строю</span>
+      <span>сессий ${p.sessions} · свободных мест ${p.free}</span></div>
+      <div class="nodes">${p.nodes.map((h) => nodeCard(byHost[h])).join("")}</div></div>`;
   }).join("");
 
   const q = $("q").value.trim().toLowerCase();
+  const pool = pf.value;
   const onlyLost = $("onlyLost").checked;
   const rows = s.sessions
     .filter((x) => !onlyLost || !x.node_online)
+    .filter((x) => !pool || x.pool === pool)
     .filter((x) => !q || [x.user, x.node, x.client_ip, x.client_event?.client].join(" ").toLowerCase().includes(q))
     .sort((a, b) => a.user.localeCompare(b.user));
   $("sessions").innerHTML = rows.length ? rows.map((x) => {
@@ -293,11 +317,11 @@ function render() {
       ? (x.status === "R" ? `<button data-a="suspend" data-h="${esc(x.node)}" data-s="${esc(x.sid)}" data-u="${esc(x.user)}">Приостановить</button>` : "") +
         `<button class="danger" data-a="terminate" data-h="${esc(x.node)}" data-s="${esc(x.sid)}" data-u="${esc(x.user)}">Завершить</button>`
       : `<button class="danger" data-a="forget" data-h="${esc(x.node)}" data-s="${esc(x.sid)}" data-u="${esc(x.user)}">Сбросить</button>`;
-    return `<tr><td><b>${esc(x.user)}</b></td><td>${esc(x.node)}</td><td>${st}</td>
+    return `<tr><td><b>${esc(x.user)}</b></td><td>${esc(poolName[x.pool] || x.pool)}</td><td>${esc(x.node)}</td><td>${st}</td>
       <td>${esc(x2goTime(x.started))}</td><td>${esc(x2goTime(x.last))}</td><td>${client}</td>
-      <td class="sid" title="${esc(x.sid)}">${esc(x.sid.length > 28 ? x.sid.slice(0, 28) + "…" : x.sid)}</td>
+      <td class="sid" title="${esc(x.sid)}">${esc(x.sid.length > 16 ? x.sid.slice(0, 16) + "…" : x.sid)}</td>
       <td><div class="acts">${acts}</div></td></tr>`;
-  }).join("") : `<tr><td colspan="8" class="empty">Сессий нет</td></tr>`;
+  }).join("") : `<tr><td colspan="9" class="empty">Сессий нет</td></tr>`;
 
   $("events").innerHTML = s.events.length ? s.events.map((e) =>
     `<div class="${e.level === "error" ? "error" : ""}"><time>${hhmm(e.time)}</time><span>${esc(e.text)}</span></div>`
@@ -320,6 +344,7 @@ document.addEventListener("click", (ev) => {
 });
 $("q").addEventListener("input", () => state && render());
 $("onlyLost").addEventListener("change", () => state && render());
+$("poolFilter").addEventListener("change", () => state && render());
 
 const EVENTS = {
   "auth.ok": "Успешный вход", "auth.fail": "Неверный пароль",
@@ -333,7 +358,7 @@ const EVENTS = {
 };
 const RESULTS = {ok: "успешно", denied: "отказ", error: "ошибка"};
 const DETAIL_NAMES = {channel: "канал", roles: "роли", node: "узел", sid: "сессия", owner: "владелец",
-  reason: "причина", resume: "возврат", forced: "принудительно", error: "ошибка", key: "блокировка",
+  reason: "причина", pool: "пул", pools: "пулы", resume: "возврат", forced: "принудительно", error: "ошибка", key: "блокировка",
   minutes: "минут", records: "записей", query: "фильтр", event: "события", path: "адрес", nodes: "узлов"};
 const CHANNELS = {terminal: "клиент X2Go", panel: "панель", cli: "консоль"};
 

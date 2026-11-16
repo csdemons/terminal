@@ -104,6 +104,9 @@ def main():
                              [{"sid": f"x{i}", "user": f"u{i}", "status": "R"} for i in range(5)]},
         "term-02.rrcki.ru": {"sessions": [{"sid": "b1", "user": "sidorov", "status": "R"}]},
         "term-03.rrcki.ru": {"sessions": [{"sid": f"y{i}", "user": f"w{i}", "status": "R"} for i in range(3)]},
+        "term-buh-01.rrcki.ru": {"sessions": [{"sid": f"bz{i}", "user": f"bz{i}", "status": "R"} for i in range(2)]},
+        "term-buh-02.rrcki.ru": {"sessions": []},
+        "term-doc-01.rrcki.ru": {"sessions": [{"sid": "dz0", "user": "dz0", "status": "R"}]},
     })
     cfg = TMP / "broker.toml"
     cfg.write_text(f"""
@@ -121,16 +124,28 @@ max_failures = 3
 max_failures_per_ip = 12
 [auth.static_users.ivanov]
 password = "secret"
+roles = ["pool:rrcki-desktop"]
 [auth.static_users.smirnov]
 password = "secret"
+roles = ["pool:rrcki-desktop"]
 [auth.static_users.kuznetsov]
 password = "secret"
+roles = ["pool:rrcki-desktop"]
 [auth.static_users.outsider]
 password = "secret"
 roles = []
+[auth.static_users.buhuser]
+password = "b"
+roles = ["pool:buh"]
+[auth.static_users.docuser]
+password = "d"
+roles = ["pool:doc"]
+[auth.static_users.both]
+password = "x"
+roles = ["pool:buh", "pool:doc"]
 [auth.static_users.admin]
 password = "adminpw"
-roles = ["admin", "user"]
+roles = ["admin", "pool:rrcki-desktop"]
 [auth.static_users.viewer]
 password = "v"
 roles = ["viewer"]
@@ -151,12 +166,38 @@ host = "term-01.rrcki.ru"
 host = "term-02.rrcki.ru"
 [[nodes]]
 host = "term-03.rrcki.ru"
+[[nodes]]
+host = "term-buh-01.rrcki.ru"
+[[nodes]]
+host = "term-buh-02.rrcki.ru"
+[[nodes]]
+host = "term-doc-01.rrcki.ru"
+max_sessions = 2
 
-[[profiles]]
+[[pools]]
 id = "rrcki-desktop"
 name = "Рабочий стол РРЦКИ"
+nodes = ["term-01.rrcki.ru", "term-02.rrcki.ru", "term-03.rrcki.ru"]
+[pools.profile]
 command = "MATE"
 fullscreen = true
+
+[[pools]]
+id = "buh"
+name = "1С Бухгалтерия"
+nodes = ["term-buh-01.rrcki.ru", "term-buh-02.rrcki.ru"]
+[pools.profile]
+command = "/opt/1cv8/x86_64/8.3.25/1cv8c"
+rootless = true
+user = "podmena"
+
+[[pools]]
+id = "doc"
+name = "1С Документооборот"
+nodes = ["term-doc-01.rrcki.ru"]
+[pools.profile]
+command = "/opt/1cv8/x86_64/8.3.25/1cv8c"
+rootless = true
 """)
     proc = subprocess.Popen([sys.executable, str(ROOT / "broker/rrcki_x2gobroker.py"), "-c", str(cfg)],
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
@@ -209,6 +250,57 @@ fullscreen = true
         host, _, sess = client_parse_session(login()[1])
         check(host == "term-03.rrcki.ru" and len(sess) == 1 and "|iv-1|" in sess[0] and "|S|" in sess[0],
               "приостановленная сессия → тот же узел и SESSION_INFO")
+
+        print("Пулы машин")
+
+        def profiles_of(user, pw):
+            ans = post({"task": "listsessions", "user": user, "password": pw, "authid": ""})[1]
+            body = ans.split("START_USER_SESSIONS\n")[1].split("END_USER_SESSIONS\n")[0]
+            return body
+
+        def pick(user, pw, pool):
+            return post({"task": "selectsession", "sid": pool, "user": user, "password": pw, "authid": ""})
+
+        body = profiles_of("buhuser", "b")
+        check("[buh]" in body and "[doc]" not in body and "[rrcki-desktop]" not in body
+              and "name=1С Бухгалтерия" in body and "rootless=true" in body
+              and "command=/opt/1cv8/x86_64/8.3.25/1cv8c" in body,
+              "бухгалтер видит только профиль своего пула, с запуском 1С без рабочего стола")
+        check("user=buhuser" in body and "podmena" not in body, "профиль пула не может подменить пользователя")
+        body = profiles_of("both", "x")
+        check("[buh]" in body and "[doc]" in body and "[rrcki-desktop]" not in body,
+              "у состоящего в двух группах — два профиля")
+        st, ans = pick("buhuser", "b", "doc")
+        check("Access granted" not in ans, "бухгалтер не может войти в чужой пул (подмена sid)")
+        host, _, _ = client_parse_session(pick("buhuser", "b", "buh")[1])
+        check(host == "term-buh-02.rrcki.ru", f"вход в пул идёт на свободный узел пула ({host})")
+        host, _, sess = client_parse_session(pick("both", "x", "doc")[1])
+        check(host == "term-doc-01.rrcki.ru" and not sess, f"второй пул — на свой узел ({host})")
+        farm = json.loads(STATE.read_text())
+        farm["term-buh-01.rrcki.ru"]["sessions"].append({"sid": "both-buh", "user": "both", "status": "S"})
+        set_farm(farm)
+        wait_poll()
+        host, _, sess = client_parse_session(pick("both", "x", "buh")[1])
+        check(host == "term-buh-01.rrcki.ru" and len(sess) == 1 and "|both-buh|" in sess[0],
+              "возврат в сессию 1С Бухгалтерии на её узел")
+        host, _, sess = client_parse_session(pick("both", "x", "doc")[1])
+        check(host == "term-doc-01.rrcki.ru" and not sess,
+              "сессия в Бухгалтерии не мешает открыть Документооборот")
+        st, ans = pick("docuser", "d", "doc")
+        check(st == 503, "пул Документооборота заполнен — отказ, хотя в других пулах места есть")
+        st, snap = admin("/admin/api/state")
+        pools = {p["id"]: p for p in snap["pools"]}
+        check(set(pools) == {"rrcki-desktop", "buh", "doc"} and pools["doc"]["free"] == 0
+              and pools["buh"]["nodes"] == ["term-buh-01.rrcki.ru", "term-buh-02.rrcki.ru"],
+              "панель показывает пулы, их узлы и свободные места")
+        check(all(x["pool"] for x in snap["sessions"]), "у каждой сессии в панели указан пул")
+        bad = TMP / "bad.toml"
+        bad.write_text(cfg.read_text().replace(
+            'nodes = ["term-doc-01.rrcki.ru"]', 'nodes = ["term-doc-01.rrcki.ru", "term-buh-01.rrcki.ru"]'))
+        r = subprocess.run([sys.executable, str(ROOT / "broker/rrcki_x2gobroker.py"), "-c", str(bad),
+                            "--check-nodes"], capture_output=True, text=True)
+        check(r.returncode != 0 and "только в одном пуле" in r.stderr,
+              "конфигурация с узлом в двух пулах отклоняется при запуске")
 
         print("Отказ узла")
         farm = json.loads(STATE.read_text())

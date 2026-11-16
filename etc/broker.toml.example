@@ -20,8 +20,9 @@ ldap_uri = ["ldaps://dc1.rrcki.ru", "ldaps://dc2.rrcki.ru"]
 domain = "rrcki.ru"                # вход проверяется как user@rrcki.ru
 base_dn = "DC=rrcki,DC=ru"
 # Полные DN групп. Вложенные группы учитываются.
-# Кому разрешён вход на терминальную ферму:
-users_group = "CN=grp-x2go-users,OU=Groups,DC=rrcki,DC=ru"
+# Доступ к ферме определяется группами пулов (ниже, [[pools]]). users_group — необязательный
+# общий допуск: если задан, человек должен состоять и в нём, и в группе пула.
+# users_group = "CN=grp-x2go-users,OU=Groups,DC=rrcki,DC=ru"
 ca_file = "/usr/local/share/ca-certificates/rrcki-root-ca.crt"   # корневой сертификат домена
 cache_seconds = 120                # успешный вход не перепроверяется в AD это время
 max_failures = 8                   # неудачных попыток на учётную запись ...
@@ -48,22 +49,58 @@ load_weight = 0.3                  # вклад загрузки CPU в выбо
 ssh_port = 22
 
 # Узлы фермы. weight — относительная мощность (узел вдвое мощнее: weight = 2.0),
-# max_sessions — свой предел вместо общего.
+# max_sessions — свой предел вместо общего. Каждый узел входит ровно в один пул.
 [[nodes]]
 host = "term-01.rrcki.ru"
 
-# [[nodes]]
-# host = "term-02.rrcki.ru"
-# weight = 1.0
-# max_sessions = 40
+[[nodes]]
+host = "term-buh-01.rrcki.ru"
 
-# Профили, которые увидит пользователь. Любые ключи профиля X2Go Client
-# (fullscreen, speed, sound, clipboard, rdpoptions, ...) передаются как есть.
-[[profiles]]
-id = "rrcki-desktop"
+[[nodes]]
+host = "term-buh-02.rrcki.ru"
+
+[[nodes]]
+host = "term-doc-01.rrcki.ru"
+max_sessions = 30                  # 1С Документооборот тяжелее, сессий на узле меньше
+
+# Пулы — наборы машин под задачу. У пула свои узлы, свои группы AD и свой профиль:
+# пользователь видит в клиенте только профили пулов, в группах которых состоит, и
+# попадает только на узлы этого пула. Состоит в двух группах — увидит два профиля.
+# Сессии в разных пулах независимы: открытая Бухгалтерия не мешает войти в Документооборот.
+#
+# [pools.profile] — любые ключи профиля X2Go Client (command, rootless, fullscreen,
+# speed, sound, clipboard, ...); host и user брокер подставляет сам.
+[[pools]]
+id = "desktop"
 name = "Рабочий стол РРЦКИ"
+groups = ["CN=grp-x2go-desktop,OU=Groups,DC=rrcki,DC=ru"]
+nodes = ["term-01.rrcki.ru"]
+[pools.profile]
 command = "MATE"                   # или XFCE — под окружение на узлах
 fullscreen = true
 speed = 2
 sound = false
+clipboard = "both"
+
+[[pools]]
+id = "1c-buh"
+name = "1С Бухгалтерия"
+groups = ["CN=grp-1c-buh,OU=Groups,DC=rrcki,DC=ru"]
+nodes = ["term-buh-01.rrcki.ru", "term-buh-02.rrcki.ru"]
+[pools.profile]
+# Опубликованное приложение: только окно 1С, без рабочего стола.
+# Путь — к тонкому клиенту 1С на узлах пула; лучше указать скрипт-обёртку,
+# которая подставит строку подключения к нужной базе (/IBName или /S сервер\база).
+command = "/usr/local/bin/1c-buh"
+rootless = true
+clipboard = "both"
+
+[[pools]]
+id = "1c-doc"
+name = "1С Документооборот"
+groups = ["CN=grp-1c-doc,OU=Groups,DC=rrcki,DC=ru"]
+nodes = ["term-doc-01.rrcki.ru"]
+[pools.profile]
+command = "/usr/local/bin/1c-doc"
+rootless = true
 clipboard = "both"

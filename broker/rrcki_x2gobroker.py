@@ -7,8 +7,10 @@ rrcki-x2gobroker — лёгкий брокер сессий X2Go.
   testcon, listsessions, selectsession, clientevent.
 * Проверяет логин и пароль в AD (LDAP bind) и членство в группе доступа.
 * Раз в несколько секунд опрашивает узлы фермы через x2go-node-agent по SSH.
-* Возвращает пользователя в его сессию, если она жива; иначе выбирает
-  самый свободный узел. Упавшие и выведенные на обслуживание узлы обходит.
+* Узлы разбиты на пулы (наборы машин: 1С Бухгалтерия, 1С Документооборот...),
+  у каждого пула своя группа AD и свой профиль в клиенте.
+* Возвращает пользователя в его сессию в этом пуле, если она жива; иначе
+  выбирает самый свободный узел пула. Упавшие и выведенные узлы обходит.
 * Панель /admin с ролями viewer, officer, admin, security и журнал аудита
   с цепочкой хешей (защита от незаметной правки записей).
 
@@ -66,7 +68,7 @@ DEFAULTS = {
         "ldap_uri": [],
         "domain": "",
         "base_dn": "",
-        "users_group": "",           # кому разрешён вход на терминальную ферму
+        "users_group": "",           # необязательный общий допуск к ферме (вдобавок к пулу)
         "roles": {},                 # роль панели -> DN группы AD
         "admins_group": "",          # устаревшее имя для roles.admin
         "ca_file": "",
@@ -95,18 +97,52 @@ def load_config(path):
         merged.update(raw.get(section, {}))
         cfg[section] = merged
     cfg["nodes"] = raw.get("nodes", [])
-    cfg["profiles"] = raw.get("profiles", [])
+    cfg["pools"] = raw.get("pools", [])
+    if "profiles" in raw:
+        raise SystemExit("[[profiles]] заменены на [[pools]]: у каждого пула свои узлы, "
+                         "группы AD и параметры профиля (см. etc/broker.toml.example)")
     if not cfg["nodes"]:
         raise SystemExit("В конфигурации нет ни одного [[nodes]]")
-    if not cfg["profiles"]:
-        raise SystemExit("В конфигурации нет ни одного [[profiles]]")
+    if not cfg["pools"]:
+        raise SystemExit("В конфигурации нет ни одного [[pools]]")
+    hosts = []
     for n in cfg["nodes"]:
         if not HOST_RE.match(n.get("host", "")):
             raise SystemExit(f"Некорректное имя узла: {n.get('host')!r}")
-    for p in cfg["profiles"]:
-        if not re.match(r"^[A-Za-z0-9_-]{1,64}$", p.get("id", "")):
-            raise SystemExit(f"Некорректный id профиля: {p.get('id')!r}")
+        if n["host"] in hosts:
+            raise SystemExit(f"Узел {n['host']} описан дважды")
+        hosts.append(n["host"])
+    owner = {}
+    ids = [p.get("id", "") for p in cfg["pools"]]
+    for p in cfg["pools"]:
+        pid = p.get("id", "")
+        if not re.match(r"^[A-Za-z0-9_-]{1,64}$", pid):
+            raise SystemExit(f"Некорректный id пула: {pid!r}")
+        if ids.count(pid) > 1:
+            raise SystemExit(f"Пул {pid} описан дважды")
+        p.setdefault("name", pid)
+        groups = p.get("groups", [])
+        p["groups"] = [groups] if isinstance(groups, str) else list(groups)
+        p["profile"] = dict(p.get("profile", {}))
+        if not p.get("nodes"):
+            raise SystemExit(f"В пуле {pid} нет узлов")
+        for h in p["nodes"]:
+            if h not in hosts:
+                raise SystemExit(f"Пул {pid}: узел {h} не описан в [[nodes]]")
+            if h in owner:
+                # Узел в двух пулах сделал бы неоднозначным, к какому пулу относится сессия.
+                raise SystemExit(f"Узел {h} входит и в {owner[h]}, и в {pid}; "
+                                 f"узел может быть только в одном пуле")
+            owner[h] = pid
+    unused = [h for h in hosts if h not in owner]
+    if unused:
+        raise SystemExit(f"Узлы не входят ни в один пул: {', '.join(unused)}")
     return cfg
+
+
+def user_pools(roles):
+    """Пулы, в которые пользователь может входить (роль 'pool:<id>')."""
+    return {r[5:] for r in roles or () if r.startswith("pool:")}
 
 
 # --------------------------------------------------------------------------- #
@@ -282,9 +318,11 @@ def normalize_user(raw):
 class Authenticator:
     """Проверка пароля в AD с кэшем успешных входов и блокировкой перебора."""
 
-    def __init__(self, cfg, audit):
+    def __init__(self, cfg, audit, pools=()):
         self.cfg = cfg
         self.audit = audit
+        # Группы пулов: роль 'pool:<id>' за членство в любой из групп пула.
+        self.pool_groups = [(f"pool:{p['id']}", g) for p in pools for g in p["groups"] if g]
         self.backend = cfg["backend"]
         # Роли панели из [auth.roles]; admins_group — для старых конфигураций.
         self.role_groups = {r: g for r, g in cfg["roles"].items() if g}
@@ -303,7 +341,7 @@ class Authenticator:
             log.warning("Аутентификация backend=static: ТОЛЬКО ДЛЯ ТЕСТОВ")
         elif self.backend == "ldap":
             import ldap3  # noqa: F401 — проверить наличие пакета при старте
-            for key in ("ldap_uri", "domain", "base_dn", "users_group"):
+            for key in ("ldap_uri", "domain", "base_dn"):
                 if not cfg[key]:
                     raise SystemExit(f"[auth] не задан {key}")
         else:
@@ -410,7 +448,7 @@ class Authenticator:
         rec = self.cfg["static_users"].get(user)
         if not rec or not hmac.compare_digest(rec.get("password", ""), password):
             return None
-        return set(rec.get("roles", ["user"]))
+        return set(rec.get("roles", []))
 
     def _check_ldap(self, user, password):
         import ldap3
@@ -438,7 +476,11 @@ class Authenticator:
             u = escape_filter_chars(user)
             roles = set()
             # 1.2.840.113556.1.4.1941 — проверка членства с учётом вложенных групп
-            for role, group in [("user", self.cfg["users_group"])] + list(self.role_groups.items()):
+            checks = [("user", self.cfg["users_group"])] if self.cfg["users_group"] else []
+            checks += list(self.role_groups.items()) + self.pool_groups
+            for role, group in checks:
+                if role in roles:
+                    continue
                 g = escape_filter_chars(group)
                 conn.search(self.cfg["base_dn"],
                             f"(&(objectCategory=person)(sAMAccountName={u})"
@@ -472,6 +514,7 @@ def parse_session(line, host):
 class Node:
     def __init__(self, spec, bal):
         self.host = spec["host"]
+        self.pool = ""
         self.label = spec.get("label", self.host)
         self.weight = float(spec.get("weight", 1.0))
         self.max_sessions = int(spec.get("max_sessions", bal["max_sessions_per_node"]))
@@ -505,7 +548,7 @@ class Node:
     def to_dict(self, now, ttl):
         st = self.status
         return {
-            "host": self.host, "label": self.label, "online": self.online,
+            "host": self.host, "label": self.label, "pool": self.pool, "online": self.online,
             "ever_seen": self.ever_seen, "drained": self.drained, "fails": self.fails,
             "last_ok": self.last_ok, "last_error": self.last_error,
             "weight": self.weight, "max_sessions": self.max_sessions,
@@ -527,6 +570,10 @@ class Farm:
         self.b = cfg["broker"]
         self.bal = cfg["balancing"]
         self.nodes = {n["host"]: Node(n, self.bal) for n in cfg["nodes"]}
+        self.pools = {p["id"]: p for p in cfg["pools"]}
+        for p in cfg["pools"]:
+            for h in p["nodes"]:
+                self.nodes[h].pool = p["id"]
         self.lock = threading.RLock()
         self.events = deque(maxlen=1000)
         self.client_events = {}     # sid -> последнее событие от клиента
@@ -653,11 +700,19 @@ class Farm:
         used = len(node.sessions) + node.reserved(now, self.bal["reserve_seconds"])
         return used < node.max_sessions
 
-    def select(self, user, ip):
-        """-> (node, [строки сессий для возобновления], пояснение) или (None, [], причина)."""
+    def pool_nodes(self, pool_id):
+        return [self.nodes[h] for h in self.pools[pool_id]["nodes"]]
+
+    def select(self, user, ip, pool_id):
+        """-> (node, [строки сессий для возобновления], пояснение) или (None, [], причина).
+
+        Учитываются только узлы пула: сессия 1С Бухгалтерии не мешает войти
+        в 1С Документооборот и наоборот."""
         now = time.time()
+        pool_name = self.pools[pool_id]["name"]
         with self.lock:
-            own = [s for n in self.nodes.values() for s in n.sessions if s["user"] == user]
+            nodes = self.pool_nodes(pool_id)
+            own = [s for n in nodes for s in n.sessions if s["user"] == user]
             alive = [s for s in own if self.nodes[s["node"]].online]
             lost = [s for s in own if not self.nodes[s["node"]].online]
             if alive:
@@ -667,12 +722,15 @@ class Farm:
                 lines = [s["raw"] for s in alive if s["node"] == node.host]
                 why = f"возврат в сессию {alive[0]['sid']} ({alive[0]['status']})"
             else:
-                cands = [n for n in self.nodes.values() if self.eligible(n, now)]
+                # Повторный вход до появления сессии в опросе: своё прежнее место
+                # освобождаем до проверки, иначе пользователь упрётся в собственный резерв.
+                held = {n.host: n.reservations.pop(user) for n in nodes if user in n.reservations}
+                cands = [n for n in nodes if self.eligible(n, now)]
                 if not cands:
-                    self.audit.write("broker.no_capacity", user, ip, "error")
-                    return None, [], "нет свободных узлов"
-                for n in self.nodes.values():      # повторный вход — резерв не удваиваем
-                    n.reservations.pop(user, None)
+                    for h, ts in held.items():
+                        self.nodes[h].reservations[user] = ts
+                    self.audit.write("broker.no_capacity", user, ip, "error", pool=pool_id)
+                    return None, [], f"нет свободных узлов в пуле «{pool_name}»"
                 node = min(cands, key=lambda n: self.score(n, now))
                 node.reservations[user] = now
                 lines = []
@@ -680,8 +738,9 @@ class Farm:
                 if lost:
                     why += f"; прежняя сессия на недоступном узле {lost[0]['node']}"
             self.last_login[user] = {"node": node.host, "ip": ip, "time": now, "why": why}
-        self.event("login", f"{user} → {node.host}: {why}", user=user, host=node.host, ip=ip)
-        self.audit.write("broker.route", user, ip, "ok", node=node.host,
+        self.event("login", f"{user} → {node.host} [{pool_name}]: {why}",
+                   user=user, host=node.host, ip=ip)
+        self.audit.write("broker.route", user, ip, "ok", pool=pool_id, node=node.host,
                          resume=bool(lines), reason=why)
         return node, lines, why
 
@@ -768,12 +827,23 @@ class Farm:
                 for s in n.sessions:
                     d = {k: v for k, v in s.items() if k != "raw"}
                     d["node_online"] = n.online
+                    d["pool"] = n.pool
                     ce = self.client_events.get(s["sid"])
                     if ce:
                         d["client_event"] = ce
                     sessions.append(d)
             events = list(self.events)[-200:]
-            return {"now": now, "nodes": nodes, "sessions": sessions,
+            pools = []
+            for pid, p in self.pools.items():
+                pn = self.pool_nodes(pid)
+                pools.append({
+                    "id": pid, "name": p["name"], "nodes": p["nodes"],
+                    "online": sum(1 for n in pn if n.online), "total": len(pn),
+                    "sessions": sum(len(n.sessions) for n in pn),
+                    "free": sum(max(0, n.max_sessions - len(n.sessions) - n.reserved(now, ttl))
+                                for n in pn if self.eligible(n, now)),
+                })
+            return {"now": now, "pools": pools, "nodes": nodes, "sessions": sessions,
                     "events": events[::-1]}
 
 
@@ -781,18 +851,22 @@ class Farm:
 # HTTP
 # --------------------------------------------------------------------------- #
 
-def profiles_ini(cfg, user, first_host):
+def profiles_ini(cfg, user, pool_ids):
+    """Профиль X2Go Client на каждый доступный пользователю пул; id профиля = id пула."""
     out = []
-    for p in cfg["profiles"]:
+    for p in cfg["pools"]:
+        if p["id"] not in pool_ids:
+            continue
         out.append(f"[{p['id']}]")
         fields = {
-            "name": p.get("name", p["id"]),
-            "command": p.get("command", "MATE"),
-            "host": first_host,          # фактический узел назначает selectsession
+            "name": p["name"],
+            "command": "MATE",
+            "host": p["nodes"][0],       # фактический узел назначает selectsession
             "user": user,
             "usebrokerpass": "true",     # вход на узел тем же паролем, что и в брокер
         }
-        fields.update({k: v for k, v in p.items() if k != "id"})
+        fields.update(p["profile"])
+        fields["user"] = user            # не даём профилю подменить пользователя
         for k, v in fields.items():
             if isinstance(v, bool):
                 v = "true" if v else "false"
@@ -874,23 +948,30 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200, "Access granted\n")
         user = normalize_user(params.get("user"))
         roles = self.app.auth.authenticate(user, params.get("password", ""), ip) if user else None
-        if not roles or "user" not in roles:
+        pools = user_pools(roles)
+        if self.app.cfg["auth"]["users_group"] and roles is not None and "user" not in roles:
+            pools = set()                # общий допуск к ферме не получен
+        if not roles or not pools:
             if roles is not None:
-                log.info("Нет доступа (не в группе): %s", user)
+                log.info("Нет доступа (нет ни одного пула): %s", user)
                 if task == "listsessions":
-                    self.app.audit.write("access.denied", user, ip, "denied",
-                                         channel="terminal", reason="нет в группе доступа к ферме")
+                    self.app.audit.write("access.denied", user, ip, "denied", channel="terminal",
+                                         reason="не состоит ни в одной группе пулов")
             return self.send(200, "Access denied\n")
         farm = self.app.farm
 
         if task == "listsessions":
-            first = next(iter(farm.nodes))
             body = ("Access granted\nSTART_USER_SESSIONS\n" +
-                    profiles_ini(self.app.cfg, user, first) + "END_USER_SESSIONS\n")
+                    profiles_ini(self.app.cfg, user, pools) + "END_USER_SESSIONS\n")
             return self.send(200, body)
 
         if task == "selectsession":
-            node, lines, why = farm.select(user, ip)
+            pool_id = params.get("sid", "")
+            if pool_id not in pools:
+                self.app.audit.write("access.denied", user, ip, "denied", channel="terminal",
+                                     reason="нет доступа к пулу", pool=pool_id[:64])
+                return self.send(200, "Access denied\n")
+            node, lines, why = farm.select(user, ip, pool_id)
             if not node:
                 farm.event("login", f"{user}: отказ — {why}", user=user, ip=ip, level="error")
                 # Без строки SERVER клиент падает при разборе ответа, поэтому отвечаем
@@ -1042,7 +1123,7 @@ class App:
     def __init__(self, cfg):
         self.cfg = cfg
         self.audit = Audit(cfg["broker"]["audit_file"])
-        self.auth = Authenticator(cfg["auth"], self.audit)
+        self.auth = Authenticator(cfg["auth"], self.audit, cfg["pools"])
         self.farm = Farm(cfg, self.audit)
 
 
@@ -1079,7 +1160,11 @@ def main(argv=None):
             print("Вход отклонён (неверный пароль или нет связи с AD — см. сообщения выше)")
             return 1
         panel = [f"{r} ({ROLE_TITLES[r]})" for r in PANEL_ROLES if r in roles]
-        print(f"Пароль верный. Вход на ферму: {'да' if 'user' in roles else 'НЕТ'}; "
+        pools = [f"{p['id']} ({p['name']})" for p in cfg["pools"] if p["id"] in user_pools(roles)]
+        gate = ""
+        if cfg["auth"]["users_group"]:
+            gate = f"общий допуск: {'да' if 'user' in roles else 'НЕТ'}; "
+        print(f"Пароль верный. {gate}пулы: {', '.join(pools) or 'НЕТ'}; "
               f"роли панели: {', '.join(panel) or 'нет'}")
         return 0
     if args.check_nodes:
@@ -1097,6 +1182,7 @@ def main(argv=None):
     poller = threading.Thread(target=app.farm.run_poller, name="poller", daemon=True)
     poller.start()
     app.audit.write("service.start", "system", "", "ok", nodes=len(app.farm.nodes),
+                    pools=sorted(app.farm.pools),
                     roles={r: bool(g) for r, g in app.auth.role_groups.items()})
     log.info("Брокер слушает %s, узлов: %d", cfg["broker"]["listen"], len(app.farm.nodes))
     try:
