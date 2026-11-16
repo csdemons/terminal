@@ -23,6 +23,7 @@ import hashlib
 import hmac
 import json
 import logging
+import math
 import os
 import re
 import secrets
@@ -466,7 +467,9 @@ class Authenticator:
                                 receive_timeout=10, raise_exceptions=False,
                                 read_only=True)
         try:
-            if not conn.open():
+            # SYNC ldap3.open() возвращает None и при успешном открытии.
+            conn.open()
+            if conn.closed:
                 raise RuntimeError(f"нет связи с контроллером домена: {conn.result}")
             if not conn.server.ssl:   # ldap:// — пароль только поверх StartTLS
                 if not conn.start_tls():
@@ -487,6 +490,8 @@ class Authenticator:
                             f"(memberOf:1.2.840.113556.1.4.1941:={g})"
                             f"(!(userAccountControl:1.2.840.113556.1.4.803:=2)))",
                             attributes=["sAMAccountName"], size_limit=1)
+                if conn.result.get("result") != 0:
+                    raise RuntimeError(f"ошибка проверки группы в AD: {conn.result}")
                 if conn.entries:
                     roles.add(role)
             return roles
@@ -502,7 +507,11 @@ class Authenticator:
 # --------------------------------------------------------------------------- #
 
 def parse_session(line, host):
+    if not isinstance(line, str) or any(c in line for c in "\r\n\x00"):
+        raise ValueError("некорректная строка сессии")
     f = line.split("|")
+    if len(f) < 12 or not SID_RE.fullmatch(f[1]) or not f[11]:
+        raise ValueError("некорректные поля сессии")
     return {
         "raw": line,
         "pid": f[0], "sid": f[1], "display": f[2], "server": f[3],
@@ -640,8 +649,24 @@ class Farm:
     def _poll_one(self, node):
         try:
             data = self._ssh(node, "status")
-            if not data.get("ok"):
+            if not isinstance(data, dict):
+                raise ValueError("агент вернул не объект")
+            if data.get("ok") is not True:
                 raise RuntimeError(data.get("error", "ошибка агента"))
+            if not isinstance(data.get("sessions"), list):
+                raise ValueError("агент не вернул список сессий")
+            # Проверяем весь ответ до изменения состояния узла. Ошибка одного
+            # агента не должна прерывать обработку ответов остальных узлов.
+            for line in data["sessions"]:
+                parse_session(line, node.host)
+            for key in ("mem_total", "mem_avail", "cpus", "load1", "load5"):
+                value = data.get(key)
+                if (type(value) not in (int, float) or not math.isfinite(value)
+                        or value < 0):
+                    raise ValueError(f"некорректная метрика {key}")
+            if (data["mem_total"] <= 0 or data["mem_avail"] > data["mem_total"]
+                    or type(data["cpus"]) is not int or data["cpus"] < 1):
+                raise ValueError("некорректная ёмкость узла")
         except Exception as exc:  # noqa: BLE001
             return node, None, str(exc)
         return node, data, None
@@ -804,18 +829,23 @@ class Farm:
                 node.status = {k: v for k, v in data.items() if k != "sessions"}
                 node.set_sessions([parse_session(l, node.host) for l in data["sessions"]])
 
-    def client_event(self, user, params, ip):
+    def client_event(self, user, params, ip, allowed_pools):
         sid = params.get("sid", "")
-        if not SID_RE.match(sid):
-            return
-        ev = {"user": user, "event": params.get("event", ""), "server": params.get("server", ""),
-              "client": params.get("client", "") or ip, "os": params.get("os", ""),
-              "version": params.get("version", ""), "time": time.time()}
+        host = params.get("server", "")
         with self.lock:
-            self.client_events[sid] = ev
+            node = self.nodes.get(host)
+            if (not SID_RE.fullmatch(sid) or node is None or node.pool not in allowed_pools
+                    or not any(s["sid"] == sid and s["user"] == user for s in node.sessions)):
+                return False
+            ev = {"user": user, "event": params.get("event", "")[:100], "server": host,
+                  "client": (params.get("client", "") or ip)[:256],
+                  "os": params.get("os", "")[:100],
+                  "version": params.get("version", "")[:100], "time": time.time()}
+            self.client_events[(host, sid)] = ev
             if len(self.client_events) > 5000:
                 for k in list(self.client_events)[:1000]:
                     del self.client_events[k]
+        return True
 
     def snapshot(self):
         now = time.time()
@@ -828,7 +858,7 @@ class Farm:
                     d = {k: v for k, v in s.items() if k != "raw"}
                     d["node_online"] = n.online
                     d["pool"] = n.pool
-                    ce = self.client_events.get(s["sid"])
+                    ce = self.client_events.get((n.host, s["sid"]))
                     if ce:
                         d["client_event"] = ce
                     sessions.append(d)
@@ -909,8 +939,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def read_body(self, limit=64 * 1024):
         n = int(self.headers.get("Content-Length") or 0)
-        if n > limit:
-            raise ValueError("слишком большой запрос")
+        if n < 0 or n > limit:
+            raise ValueError("некорректный размер запроса")
         return self.rfile.read(n) if n else b""
 
     # ---- маршрутизация ----
@@ -983,7 +1013,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200, out)
 
         if task == "clientevent":
-            farm.client_event(user, params, ip)
+            if not farm.client_event(user, params, ip, pools):
+                return self.send(200, "Access denied\n")
             return self.send(200, "Access granted\n")
 
         if task == "setpass":
