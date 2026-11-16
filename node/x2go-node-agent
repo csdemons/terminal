@@ -18,7 +18,6 @@ import json
 import os
 import re
 import shutil
-import signal
 import socket
 import subprocess
 import sys
@@ -47,12 +46,19 @@ def list_sessions():
         raise RuntimeError("x2golistsessions_root не найден (установлен ли x2goserver?)")
     res = subprocess.run([tool], capture_output=True, text=True,
                          timeout=LIST_TIMEOUT, env={"PATH": SBIN_PATH})
+    if res.returncode != 0:
+        raise RuntimeError("не удалось получить список сессий: " +
+                           (res.stderr.strip() or f"код {res.returncode}")[-300:])
     lines = []
     for line in res.stdout.splitlines():
         f = line.strip().split("|")
         # agent_pid|session_id|display|server|status|init_time|cookie|client|
         # gr_port|snd_port|last_time|user|age|fs_port|...
-        if len(f) < 12 or f[4] == "F":
+        if not line.strip():
+            continue
+        if len(f) < 12:
+            raise RuntimeError("x2golistsessions_root вернул повреждённую строку")
+        if f[4] == "F":
             continue
         lines.append(line.strip())
     return lines
@@ -109,7 +115,7 @@ def cmd_action(action, sid):
     f = find_session(sid)
     if not f:
         out({"ok": False, "error": "сессия не найдена"}, 1)
-    user, agent_pid = f[11], f[0]
+    user = f[11]
     tool = which("x2gosuspend-session" if action == "suspend" else "x2goterminate-session")
     if not tool:
         out({"ok": False, "error": "утилита x2go не найдена"}, 1)
@@ -120,17 +126,9 @@ def cmd_action(action, sid):
     except subprocess.TimeoutExpired:
         ok, detail = False, "таймаут"
 
-    forced = False
-    if not ok and action == "terminate" and agent_pid.isdigit():
-        # Сессия зависла: убиваем x2goagent, x2gocleansessions приберёт остальное.
-        try:
-            os.kill(int(agent_pid), signal.SIGKILL)
-            forced, ok = True, True
-        except ProcessLookupError:
-            forced, ok = True, True
-        except OSError as exc:
-            detail = f"{detail}; kill: {exc}"
-    out({"ok": ok, "user": user, "forced": forced, "detail": detail}, 0 if ok else 1)
+    # PID из БД может устареть и принадлежать другому процессу. Не посылаем
+    # SIGKILL от root: неудачу штатной утилиты возвращаем администратору.
+    out({"ok": ok, "user": user, "forced": False, "detail": detail}, 0 if ok else 1)
 
 
 def main():
