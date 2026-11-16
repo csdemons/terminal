@@ -1,0 +1,398 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ферма X2Go</title>
+<style>
+:root {
+  --bg: #f4f5f7; --panel: #ffffff; --ink: #1b1f24; --muted: #667080; --line: #e3e6ea;
+  --ok: #1f8a4c; --ok-bg: #e6f4ec; --warn: #a86100; --warn-bg: #fff3e0;
+  --bad: #c0312b; --bad-bg: #fdecea; --idle: #5b6472; --idle-bg: #eef0f3;
+  --accent: #2357c6; --bar: #d9dee5;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14171b; --panel: #1c2026; --ink: #e6e9ed; --muted: #8b95a3; --line: #2c323a;
+    --ok: #4cc27f; --ok-bg: #173323; --warn: #f0a640; --warn-bg: #3a2a12;
+    --bad: #ff6b62; --bad-bg: #3d1a18; --idle: #9aa3af; --idle-bg: #262b32;
+    --accent: #7aa2ff; --bar: #303741;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink);
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+header { display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap;
+  padding: 16px 24px; border-bottom: 1px solid var(--line); background: var(--panel); }
+header h1 { margin: 0; font-size: 18px; }
+header .meta { color: var(--muted); font-size: 13px; margin-left: auto; }
+main { padding: 20px 24px 40px; max-width: 1400px; margin: 0 auto; }
+.summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 20px; }
+.stat { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+.stat b { display: block; font-size: 24px; font-variant-numeric: tabular-nums; }
+.stat span { color: var(--muted); font-size: 12px; }
+h2 { font-size: 15px; margin: 24px 0 10px; }
+.nodes { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }
+.node { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; }
+.node.offline { border-color: var(--bad); }
+.node .top { display: flex; align-items: center; gap: 8px; }
+.node .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pill { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 99px; white-space: nowrap; }
+.pill.ok { color: var(--ok); background: var(--ok-bg); }
+.pill.bad { color: var(--bad); background: var(--bad-bg); }
+.pill.warn { color: var(--warn); background: var(--warn-bg); }
+.pill.idle { color: var(--idle); background: var(--idle-bg); }
+.node .top .pill { margin-left: auto; }
+.metric { margin-top: 10px; font-size: 12px; color: var(--muted); }
+.metric .row { display: flex; justify-content: space-between; }
+.metric .row b { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
+.bar { height: 6px; background: var(--bar); border-radius: 3px; margin-top: 4px; overflow: hidden; }
+.bar i { display: block; height: 100%; background: var(--accent); }
+.bar i.hot { background: var(--warn); } .bar i.full { background: var(--bad); }
+.err { margin-top: 8px; font-size: 12px; color: var(--bad); word-break: break-word; }
+.node .actions { margin-top: 12px; }
+button { font: inherit; font-size: 12px; padding: 4px 10px; border-radius: 6px; cursor: pointer;
+  border: 1px solid var(--line); background: var(--panel); color: var(--ink); }
+button:hover { border-color: var(--accent); }
+button.danger { color: var(--bad); } button.danger:hover { border-color: var(--bad); }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+.toolbar { display: flex; gap: 10px; padding: 10px 12px; border-bottom: 1px solid var(--line); flex-wrap: wrap; align-items: center; }
+.toolbar input[type=search] { font: inherit; padding: 5px 10px; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--bg); color: var(--ink); min-width: 220px; }
+.toolbar label { color: var(--muted); font-size: 13px; display: flex; gap: 6px; align-items: center; }
+.scroll { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { text-align: left; padding: 7px 12px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+th { color: var(--muted); font-weight: 600; font-size: 12px; background: var(--bg); position: sticky; top: 0; }
+tr:last-child td { border-bottom: 0; }
+td.sid { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; color: var(--muted); }
+td .acts { display: flex; gap: 6px; }
+.empty { padding: 20px; color: var(--muted); text-align: center; }
+.events { max-height: 340px; overflow-y: auto; }
+.events div { padding: 6px 12px; border-bottom: 1px solid var(--line); font-size: 13px; display: flex; gap: 12px; }
+.events div.error { color: var(--bad); }
+.events time { color: var(--muted); font-variant-numeric: tabular-nums; flex: none; }
+nav.tabs { display: flex; gap: 4px; }
+nav.tabs button { border: 0; background: none; padding: 6px 12px; font-size: 14px; color: var(--muted); border-radius: 6px; }
+nav.tabs button.on { background: var(--bg); color: var(--ink); font-weight: 600; }
+.roles { display: flex; gap: 6px; flex-wrap: wrap; }
+.banner { padding: 10px 14px; border-radius: 8px; margin-bottom: 14px; font-size: 13px; }
+.banner.ok { background: var(--ok-bg); color: var(--ok); }
+.banner.bad { background: var(--bad-bg); color: var(--bad); font-weight: 600; }
+.toolbar select { font: inherit; padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--ink); }
+.toolbar a.btn { font-size: 12px; padding: 5px 10px; border-radius: 6px; border: 1px solid var(--line); color: var(--ink); text-decoration: none; margin-left: auto; }
+.toolbar a.btn:hover { border-color: var(--accent); }
+td.details { white-space: normal; color: var(--muted); font-size: 12px; min-width: 260px; }
+td.r-denied, td.r-error { color: var(--bad); font-weight: 600; }
+td.r-ok { color: var(--ok); }
+.readonly-note { color: var(--muted); font-size: 12px; margin-top: 12px; }
+[hidden] { display: none !important; }
+#toast { position: fixed; bottom: 20px; right: 20px; max-width: 420px; padding: 10px 14px; border-radius: 8px;
+  background: var(--ink); color: var(--panel); font-size: 13px; opacity: 0; transition: opacity .2s; pointer-events: none; }
+#toast.show { opacity: 1; }
+@media (max-width: 600px) { header, main { padding-left: 16px; padding-right: 16px; } .toolbar input[type=search] { min-width: 0; flex: 1; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Ферма X2Go</h1>
+  <nav class="tabs" id="tabs" hidden>
+    <button data-tab="farm" class="on">Ферма</button>
+    <button data-tab="audit">Аудит</button>
+  </nav>
+  <span class="meta" id="meta">загрузка…</span>
+  <span class="roles" id="roles"></span>
+</header>
+<main>
+<section id="tab-farm">
+  <div class="summary" id="summary"></div>
+
+  <h2>Узлы</h2>
+  <div class="nodes" id="nodes"></div>
+
+  <h2>Сессии</h2>
+  <div class="panel">
+    <div class="toolbar">
+      <input id="q" type="search" placeholder="Пользователь, узел или IP">
+      <label><input type="checkbox" id="onlyLost"> только на недоступных узлах</label>
+    </div>
+    <div class="scroll"><table>
+      <thead><tr><th>Пользователь</th><th>Узел</th><th>Статус</th><th>Начата</th>
+        <th>Активность</th><th>Клиент</th><th>Сессия</th><th></th></tr></thead>
+      <tbody id="sessions"></tbody>
+    </table></div>
+  </div>
+
+  <h2>Оперативный журнал</h2>
+  <div class="panel events" id="events"></div>
+  <p class="readonly-note" id="readonlyNote" hidden>Ваша роль позволяет только просмотр.</p>
+</section>
+
+<section id="tab-audit" hidden>
+  <div class="banner" id="integrity"></div>
+
+  <h2>Блокировки входа</h2>
+  <div class="panel"><div class="scroll"><table>
+    <thead><tr><th>Кого</th><th>Неудачных попыток</th><th>До</th><th></th></tr></thead>
+    <tbody id="lockouts"></tbody>
+  </table></div></div>
+
+  <h2>Журнал аудита</h2>
+  <div class="panel">
+    <div class="toolbar">
+      <input id="aq" type="search" placeholder="Пользователь, IP, узел, сессия">
+      <select id="aev">
+        <option value="">Все события</option>
+        <option value="auth.">Вход и пароли</option>
+        <option value="access.">Отказы в доступе</option>
+        <option value="broker.">Распределение по узлам</option>
+        <option value="session.">Действия с сессиями</option>
+        <option value="node.">Действия с узлами</option>
+        <option value="security.">Снятие блокировок</option>
+        <option value="audit.">Выгрузки журнала</option>
+        <option value="service.">Запуски брокера</option>
+      </select>
+      <a class="btn" id="csv" href="/admin/api/audit.csv">Выгрузить CSV</a>
+    </div>
+    <div class="scroll"><table>
+      <thead><tr><th>Время</th><th>Событие</th><th>Кто</th><th>IP</th><th>Результат</th><th>Подробности</th></tr></thead>
+      <tbody id="audit"></tbody>
+    </table></div>
+  </div>
+</section>
+</main>
+<div id="toast"></div>
+
+<script>
+"use strict";
+let state = null;
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
+  ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
+
+function ago(ts) {
+  if (!ts) return "—";
+  const s = Math.max(0, Math.round(state.now - ts));
+  if (s < 60) return s + " с назад";
+  if (s < 3600) return Math.round(s / 60) + " мин назад";
+  if (s < 86400) return Math.round(s / 3600) + " ч назад";
+  return Math.round(s / 86400) + " дн назад";
+}
+function x2goTime(t) {           // "2026-11-16T21:30:12" из базы x2go
+  if (!t) return "—";
+  return t.replace("T", " ").slice(0, 16);
+}
+function gb(b) { return b ? (b / 1073741824).toFixed(0) + " ГБ" : "—"; }
+function hhmm(ts) {
+  const d = new Date(ts * 1000);
+  return d.toLocaleDateString("ru-RU", {day: "2-digit", month: "2-digit"}) + " " +
+         d.toLocaleTimeString("ru-RU", {hour: "2-digit", minute: "2-digit", second: "2-digit"});
+}
+function bar(frac) {
+  const p = Math.max(0, Math.min(100, frac * 100));
+  const cls = p >= 90 ? "full" : p >= 75 ? "hot" : "";
+  return `<div class="bar"><i class="${cls}" style="width:${p.toFixed(0)}%"></i></div>`;
+}
+function toast(msg) {
+  const t = $("toast"); t.textContent = msg; t.classList.add("show");
+  clearTimeout(toast.h); toast.h = setTimeout(() => t.classList.remove("show"), 4000);
+}
+
+async function api(path, opts = {}) {
+  const r = await fetch(path, {credentials: "same-origin", ...opts});
+  if (!r.ok) {
+    let msg = "HTTP " + r.status;
+    try { msg = (await r.json()).error || msg; } catch (e) {}
+    throw new Error(msg);
+  }
+  return r.json();
+}
+async function act(payload, question) {
+  if (question && !confirm(question)) return;
+  try {
+    const res = await api("/admin/api/action", {
+      method: "POST",
+      headers: {"Content-Type": "application/json", "X-Broker-Admin": "1"},
+      body: JSON.stringify(payload),
+    });
+    toast(res.ok ? "Готово" + (res.forced ? " (сессия завершена принудительно)" : "")
+                 : "Ошибка: " + (res.error || res.detail || "неизвестно"));
+  } catch (e) { toast("Ошибка: " + e.message); }
+  setTimeout(refresh, 600);
+  if (payload.action === "unlock") setTimeout(refreshAudit, 600);
+}
+
+function nodeStatus(n) {
+  if (!n.online) return n.ever_seen ? ["bad", "недоступен"] : ["bad", "нет связи"];
+  if (n.drained) return ["warn", "обслуживание"];
+  if (n.fails) return ["warn", "сбои опроса: " + n.fails];
+  return ["ok", "в строю"];
+}
+
+const can = (p) => state && state.perms.includes(p);
+
+function renderHeader() {
+  $("roles").innerHTML = state.roles.map((r) =>
+    `<span class="pill idle" title="${esc(r)}">${esc(state.role_titles[r] || r)}</span>`).join("");
+  $("tabs").hidden = !can("audit");
+  $("readonlyNote").hidden = can("sessions") || can("nodes");
+}
+
+function render() {
+  const s = state;
+  renderHeader();
+  const online = s.nodes.filter((n) => n.online);
+  const active = online.filter((n) => !n.drained);
+  const cap = active.reduce((a, n) => a + Math.max(0, n.max_sessions - n.sessions_total - n.reserved), 0);
+  const run = s.sessions.filter((x) => x.status === "R").length;
+  const sus = s.sessions.filter((x) => x.status === "S").length;
+  const lost = s.sessions.filter((x) => !x.node_online).length;
+  $("meta").textContent = `${s.admin} · обновлено ${new Date(s.now * 1000).toLocaleTimeString("ru-RU")}`;
+  $("summary").innerHTML = [
+    [`${online.length} / ${s.nodes.length}`, "узлов в строю"],
+    [run, "активных сессий"],
+    [sus, "приостановленных"],
+    [cap, "свободных мест"],
+    [lost, "на недоступных узлах"],
+  ].map(([v, l]) => `<div class="stat"><b>${esc(v)}</b><span>${esc(l)}</span></div>`).join("");
+
+  $("nodes").innerHTML = s.nodes.map((n) => {
+    const [cls, label] = nodeStatus(n);
+    const used = n.sessions_total + n.reserved;
+    const memUsed = n.mem_total ? 1 - n.mem_avail / n.mem_total : 0;
+    const load = n.cpus ? (n.load1 || 0) / n.cpus : 0;
+    return `<div class="node ${n.online ? "" : "offline"}">
+      <div class="top"><span class="name" title="${esc(n.host)}">${esc(n.label)}</span>
+        <span class="pill ${cls}">${esc(label)}</span></div>
+      <div class="metric"><div class="row"><span>Сессии</span>
+        <b>${n.sessions_running} акт. · ${n.sessions_suspended} пр. · ${used}/${n.max_sessions}</b></div>${bar(used / n.max_sessions)}</div>
+      <div class="metric"><div class="row"><span>Память</span>
+        <b>${n.mem_total ? gb(n.mem_total - n.mem_avail) + " из " + gb(n.mem_total) : "—"}</b></div>${bar(memUsed)}</div>
+      <div class="metric"><div class="row"><span>Загрузка CPU</span>
+        <b>${n.load1 != null ? n.load1.toFixed(1) + " / " + n.cpus + " ядер" : "—"}</b></div>${bar(load)}</div>
+      <div class="metric"><div class="row"><span>Последний ответ</span><b>${ago(n.last_ok)}</b></div></div>
+      ${n.last_error ? `<div class="err">${esc(n.last_error)}</div>` : ""}
+      ${can("nodes") ? `<div class="actions">${n.drained
+        ? `<button data-a="undrain" data-h="${esc(n.host)}">Вернуть в работу</button>`
+        : `<button data-a="drain" data-h="${esc(n.host)}">Вывести на обслуживание</button>`}</div>` : ""}
+    </div>`;
+  }).join("");
+
+  const q = $("q").value.trim().toLowerCase();
+  const onlyLost = $("onlyLost").checked;
+  const rows = s.sessions
+    .filter((x) => !onlyLost || !x.node_online)
+    .filter((x) => !q || [x.user, x.node, x.client_ip, x.client_event?.client].join(" ").toLowerCase().includes(q))
+    .sort((a, b) => a.user.localeCompare(b.user));
+  $("sessions").innerHTML = rows.length ? rows.map((x) => {
+    const st = !x.node_online ? `<span class="pill bad">узел недоступен</span>`
+      : x.status === "R" ? `<span class="pill ok">активна</span>`
+      : `<span class="pill idle">приостановлена</span>`;
+    const client = x.client_event ? `${esc(x.client_event.client)} · ${esc(x.client_event.os)}` : esc(x.client_ip || "—");
+    const acts = !can("sessions") ? "" : x.node_online
+      ? (x.status === "R" ? `<button data-a="suspend" data-h="${esc(x.node)}" data-s="${esc(x.sid)}" data-u="${esc(x.user)}">Приостановить</button>` : "") +
+        `<button class="danger" data-a="terminate" data-h="${esc(x.node)}" data-s="${esc(x.sid)}" data-u="${esc(x.user)}">Завершить</button>`
+      : `<button class="danger" data-a="forget" data-h="${esc(x.node)}" data-s="${esc(x.sid)}" data-u="${esc(x.user)}">Сбросить</button>`;
+    return `<tr><td><b>${esc(x.user)}</b></td><td>${esc(x.node)}</td><td>${st}</td>
+      <td>${esc(x2goTime(x.started))}</td><td>${esc(x2goTime(x.last))}</td><td>${client}</td>
+      <td class="sid" title="${esc(x.sid)}">${esc(x.sid.length > 28 ? x.sid.slice(0, 28) + "…" : x.sid)}</td>
+      <td><div class="acts">${acts}</div></td></tr>`;
+  }).join("") : `<tr><td colspan="8" class="empty">Сессий нет</td></tr>`;
+
+  $("events").innerHTML = s.events.length ? s.events.map((e) =>
+    `<div class="${e.level === "error" ? "error" : ""}"><time>${hhmm(e.time)}</time><span>${esc(e.text)}</span></div>`
+  ).join("") : `<div class="empty">Событий пока нет</div>`;
+}
+
+document.addEventListener("click", (ev) => {
+  const b = ev.target.closest("button[data-a]");
+  if (!b) return;
+  const {a, h, s, u, k, v} = b.dataset;
+  if (a === "unlock") return act({action: a, key: k}, `Снять блокировку входа для ${v}?`);
+  const q = {
+    drain: `Вывести ${h} на обслуживание? Новые сессии туда не пойдут, текущие продолжат работать.`,
+    undrain: null,
+    suspend: `Приостановить сессию ${u} на ${h}? Пользователь сможет вернуться в неё.`,
+    terminate: `Завершить сессию ${u} на ${h}? Несохранённые данные в открытых программах будут потеряны. При следующем входе пользователь попадёт на свободный узел.`,
+    forget: `Сбросить сессию ${u} на недоступном узле ${h}? Если узел вернётся, сессия может снова появиться в списке.`,
+  }[a];
+  act({action: a, host: h, sid: s}, q);
+});
+$("q").addEventListener("input", () => state && render());
+$("onlyLost").addEventListener("change", () => state && render());
+
+const EVENTS = {
+  "auth.ok": "Успешный вход", "auth.fail": "Неверный пароль",
+  "auth.lockout": "Блокировка после перебора", "auth.blocked": "Вход при блокировке",
+  "auth.error": "Ошибка связи с AD", "access.denied": "Отказ в доступе",
+  "broker.route": "Направлен на узел", "broker.no_capacity": "Нет свободных узлов",
+  "node.drain": "Узел выведен на обслуживание", "node.undrain": "Узел возвращён в работу",
+  "session.suspend": "Сессия приостановлена", "session.terminate": "Сессия завершена",
+  "session.forget": "Сессия сброшена из учёта", "security.unlock": "Снята блокировка",
+  "audit.export": "Выгрузка журнала", "service.start": "Запуск брокера",
+};
+const RESULTS = {ok: "успешно", denied: "отказ", error: "ошибка"};
+const DETAIL_NAMES = {channel: "канал", roles: "роли", node: "узел", sid: "сессия", owner: "владелец",
+  reason: "причина", resume: "возврат", forced: "принудительно", error: "ошибка", key: "блокировка",
+  minutes: "минут", records: "записей", query: "фильтр", event: "события", path: "адрес", nodes: "узлов"};
+const CHANNELS = {terminal: "клиент X2Go", panel: "панель", cli: "консоль"};
+
+function fmtDetails(d) {
+  return Object.entries(d || {})
+    .filter(([, v]) => v !== "" && v !== false && v != null && !(Array.isArray(v) && !v.length))
+    .map(([k, v]) => {
+      if (k === "channel") v = CHANNELS[v] || v;
+      else if (v === true) v = "да";
+      else if (Array.isArray(v)) v = v.join(", ");
+      else if (typeof v === "object") v = JSON.stringify(v);
+      return `${DETAIL_NAMES[k] || k}: ${v}`;
+    }).join(" · ");
+}
+
+let auditTimer = null;
+async function refreshAudit() {
+  const qs = new URLSearchParams({q: $("aq").value.trim(), event: $("aev").value, limit: "500"});
+  $("csv").href = "/admin/api/audit.csv?" + new URLSearchParams({q: qs.get("q"), event: qs.get("event")});
+  let a;
+  try { a = await api("/admin/api/audit?" + qs); }
+  catch (e) { $("integrity").className = "banner bad"; $("integrity").textContent = "Журнал недоступен: " + e.message; return; }
+  const it = a.integrity;
+  $("integrity").className = "banner " + (it.ok ? "ok" : "bad");
+  $("integrity").textContent = it.ok
+    ? `Целостность журнала подтверждена: цепочка хешей не нарушена, записей ${it.records}.`
+    : `НАРУШЕНА ЦЕЛОСТНОСТЬ ЖУРНАЛА: строка ${it.line} — ${it.error}. Сверьте с копией в SIEM.`;
+  $("lockouts").innerHTML = a.lockouts.length ? a.lockouts.map((l) => `<tr>
+      <td><b>${esc(l.value)}</b> <span class="pill idle">${l.kind === "user" ? "пользователь" : "адрес"}</span></td>
+      <td>${l.failures}</td><td>${hhmm(l.until)}</td>
+      <td>${can("unlock") ? `<button data-a="unlock" data-k="${esc(l.key)}" data-v="${esc(l.value)}">Снять блокировку</button>` : ""}</td>
+    </tr>`).join("") : `<tr><td colspan="4" class="empty">Активных блокировок нет</td></tr>`;
+  $("audit").innerHTML = a.records.length ? a.records.map((r) => `<tr>
+      <td>${esc(r.ts.replace("T", " ").slice(0, 19))}</td>
+      <td>${esc(EVENTS[r.event] || r.event)}</td>
+      <td><b>${esc(r.actor)}</b></td><td>${esc(r.ip)}</td>
+      <td class="r-${esc(r.result)}">${esc(RESULTS[r.result] || r.result)}</td>
+      <td class="details">${esc(fmtDetails(r.details))}</td></tr>`).join("")
+    : `<tr><td colspan="6" class="empty">Записей нет</td></tr>`;
+}
+
+function showTab(name) {
+  document.querySelectorAll("nav.tabs button").forEach((b) => b.classList.toggle("on", b.dataset.tab === name));
+  $("tab-farm").hidden = name !== "farm";
+  $("tab-audit").hidden = name !== "audit";
+  clearInterval(auditTimer);
+  if (name === "audit") { refreshAudit(); auditTimer = setInterval(refreshAudit, 10000); }
+}
+document.querySelectorAll("nav.tabs button").forEach((b) => b.addEventListener("click", () => showTab(b.dataset.tab)));
+let auditDebounce = null;
+$("aq").addEventListener("input", () => { clearTimeout(auditDebounce); auditDebounce = setTimeout(refreshAudit, 300); });
+$("aev").addEventListener("change", refreshAudit);
+
+async function refresh() {
+  try { state = await api("/admin/api/state"); render(); }
+  catch (e) { $("meta").textContent = "нет связи с брокером: " + e.message; }
+}
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>

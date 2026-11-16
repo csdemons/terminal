@@ -1,0 +1,153 @@
+#!/usr/bin/python3 -I
+# -*- coding: utf-8 -*-
+"""
+x2go-node-agent — агент узла фермы X2Go для rrcki-x2gobroker.
+
+Запускается брокером по SSH через forced command (см. authorized_keys)
+и выполняет ровно одну команду из белого списка:
+
+    status              JSON: сессии узла, загрузка, память
+    suspend  <sid>      приостановить сессию
+    terminate <sid>     завершить сессию (при зависании — принудительно)
+
+Владелец сессии берётся из базы сессий узла, а не из запроса, поэтому
+брокер не может действовать от имени произвольного пользователя.
+Работает от root через sudo (см. sudoers.d/x2go-node-agent).
+"""
+import json
+import os
+import re
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import time
+
+SID_RE = re.compile(r"^[A-Za-z0-9._+@-]{1,200}$")
+SBIN_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+LIST_TIMEOUT = 15
+ACTION_TIMEOUT = 30
+
+
+def out(obj, code=0):
+    sys.stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
+    sys.stdout.flush()
+    sys.exit(code)
+
+
+def which(name):
+    return shutil.which(name, path=SBIN_PATH)
+
+
+def list_sessions():
+    """Сырые строки x2golistsessions_root, без сессий в статусе F (failed)."""
+    tool = which("x2golistsessions_root")
+    if not tool:
+        raise RuntimeError("x2golistsessions_root не найден (установлен ли x2goserver?)")
+    res = subprocess.run([tool], capture_output=True, text=True,
+                         timeout=LIST_TIMEOUT, env={"PATH": SBIN_PATH})
+    lines = []
+    for line in res.stdout.splitlines():
+        f = line.strip().split("|")
+        # agent_pid|session_id|display|server|status|init_time|cookie|client|
+        # gr_port|snd_port|last_time|user|age|fs_port|...
+        if len(f) < 12 or f[4] == "F":
+            continue
+        lines.append(line.strip())
+    return lines
+
+
+def meminfo():
+    data = {}
+    with open("/proc/meminfo") as fh:
+        for line in fh:
+            key, _, rest = line.partition(":")
+            data[key] = int(rest.split()[0]) * 1024
+    return data.get("MemTotal", 0), data.get("MemAvailable", 0)
+
+
+def cmd_status():
+    t0 = time.monotonic()
+    sessions = list_sessions()
+    load1, load5, _ = os.getloadavg()
+    total, avail = meminfo()
+    with open("/proc/uptime") as fh:
+        uptime = float(fh.read().split()[0])
+    out({
+        "ok": True,
+        "hostname": socket.gethostname(),
+        "cpus": os.cpu_count() or 1,
+        "load1": load1,
+        "load5": load5,
+        "mem_total": total,
+        "mem_avail": avail,
+        "uptime": uptime,
+        "list_ms": int((time.monotonic() - t0) * 1000),
+        "sessions": sessions,
+    })
+
+
+def find_session(sid):
+    for line in list_sessions():
+        f = line.split("|")
+        if f[1] == sid:
+            return f
+    return None
+
+
+def run_as(user, args):
+    runuser = which("runuser") or "/sbin/runuser"
+    return subprocess.run([runuser, "-u", user, "--"] + args,
+                          capture_output=True, text=True,
+                          timeout=ACTION_TIMEOUT, env={"PATH": SBIN_PATH})
+
+
+def cmd_action(action, sid):
+    if not SID_RE.match(sid):
+        out({"ok": False, "error": "некорректный идентификатор сессии"}, 2)
+    f = find_session(sid)
+    if not f:
+        out({"ok": False, "error": "сессия не найдена"}, 1)
+    user, agent_pid = f[11], f[0]
+    tool = which("x2gosuspend-session" if action == "suspend" else "x2goterminate-session")
+    if not tool:
+        out({"ok": False, "error": "утилита x2go не найдена"}, 1)
+    try:
+        res = run_as(user, [tool, sid])
+        ok = res.returncode == 0
+        detail = (res.stderr or res.stdout).strip()[-500:]
+    except subprocess.TimeoutExpired:
+        ok, detail = False, "таймаут"
+
+    forced = False
+    if not ok and action == "terminate" and agent_pid.isdigit():
+        # Сессия зависла: убиваем x2goagent, x2gocleansessions приберёт остальное.
+        try:
+            os.kill(int(agent_pid), signal.SIGKILL)
+            forced, ok = True, True
+        except ProcessLookupError:
+            forced, ok = True, True
+        except OSError as exc:
+            detail = f"{detail}; kill: {exc}"
+    out({"ok": ok, "user": user, "forced": forced, "detail": detail}, 0 if ok else 1)
+
+
+def main():
+    # Команда приходит одной строкой: из SSH_ORIGINAL_COMMAND (через authorized_keys)
+    # или аргументами при ручном запуске администратором.
+    raw = " ".join(sys.argv[1:]).strip()
+    parts = raw.split()
+    try:
+        if parts == ["status"]:
+            cmd_status()
+        elif len(parts) == 2 and parts[0] in ("suspend", "terminate"):
+            cmd_action(parts[0], parts[1])
+        else:
+            out({"ok": False, "error": "неизвестная команда"}, 2)
+    except Exception as exc:  # noqa: BLE001 — брокеру нужен JSON, а не трассировка
+        out({"ok": False, "error": f"{type(exc).__name__}: {exc}"}, 1)
+
+
+if __name__ == "__main__":
+    main()

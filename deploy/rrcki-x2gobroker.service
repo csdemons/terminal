@@ -1,0 +1,23 @@
+[Unit]
+Description=RRCKI X2Go session broker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=x2gobroker
+Group=x2gobroker
+ExecStart=/usr/bin/python3 /opt/rrcki-x2gobroker/rrcki_x2gobroker.py -c /etc/rrcki-x2gobroker/broker.toml
+Restart=always
+RestartSec=3
+StateDirectory=rrcki-x2gobroker
+LogsDirectory=rrcki-x2gobroker
+LogsDirectoryMode=0750
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/rrcki-x2gobroker /var/log/rrcki-x2gobroker
+
+[Install]
+WantedBy=multi-user.target

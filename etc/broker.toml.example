@@ -1,0 +1,69 @@
+# /etc/rrcki-x2gobroker/broker.toml
+# После правки: systemctl restart rrcki-x2gobroker
+
+[broker]
+listen = "127.0.0.1:8080"          # снаружи брокер доступен только через nginx (TLS)
+state_file = "/var/lib/rrcki-x2gobroker/state.json"
+poll_interval = 10                 # опрос узлов, секунд
+offline_after = 3                  # столько неудачных опросов подряд — узел недоступен (~30 с)
+ssh_user = "x2gobroker"            # локальный пользователь на узлах
+ssh_key = "/etc/rrcki-x2gobroker/node_key"
+known_hosts = "/etc/rrcki-x2gobroker/known_hosts"
+ssh_timeout = 8
+trusted_proxies = ["127.0.0.1", "::1"]
+audit_file = "/var/log/rrcki-x2gobroker/audit.jsonl"   # журнал аудита с цепочкой хешей
+
+[auth]
+backend = "ldap"
+# Два контроллера: при недоступности первого запрос уйдёт на второй.
+ldap_uri = ["ldaps://dc1.rrcki.ru", "ldaps://dc2.rrcki.ru"]
+domain = "rrcki.ru"                # вход проверяется как user@rrcki.ru
+base_dn = "DC=rrcki,DC=ru"
+# Полные DN групп. Вложенные группы учитываются.
+# Кому разрешён вход на терминальную ферму:
+users_group = "CN=grp-x2go-users,OU=Groups,DC=rrcki,DC=ru"
+ca_file = "/usr/local/share/ca-certificates/rrcki-root-ca.crt"   # корневой сертификат домена
+cache_seconds = 120                # успешный вход не перепроверяется в AD это время
+max_failures = 8                   # неудачных попыток на учётную запись ...
+max_failures_per_ip = 40           # ... или на один адрес (через NAT/VPN ходят многие) ...
+lockout_seconds = 300              # ... за это время — временная блокировка
+
+# Роли панели /admin. Роли суммируются, если человек состоит в нескольких группах.
+#   viewer   — только просмотр узлов, сессий и оперативного журнала
+#   officer  — дежурный: + приостановить / завершить / сбросить сессию пользователя
+#   admin    — + вывести узел на обслуживание и вернуть
+#   security — просмотр + журнал аудита, проверка его целостности, выгрузка, снятие блокировок
+# admin не видит аудит, security не управляет фермой — разделение обязанностей.
+[auth.roles]
+viewer   = "CN=grp-x2go-viewers,OU=Groups,DC=rrcki,DC=ru"
+officer  = "CN=grp-x2go-officers,OU=Groups,DC=rrcki,DC=ru"
+admin    = "CN=grp-x2go-admins,OU=Groups,DC=rrcki,DC=ru"
+security = "CN=grp-x2go-security,OU=Groups,DC=rrcki,DC=ru"
+
+[balancing]
+max_sessions_per_node = 40         # по умолчанию для всех узлов
+min_free_mem_percent = 10          # узел с меньшим запасом памяти новых сессий не получает
+reserve_seconds = 60               # место за пользователем, пока его сессия не появится в опросе
+load_weight = 0.3                  # вклад загрузки CPU в выбор относительно числа сессий
+ssh_port = 22
+
+# Узлы фермы. weight — относительная мощность (узел вдвое мощнее: weight = 2.0),
+# max_sessions — свой предел вместо общего.
+[[nodes]]
+host = "term-01.rrcki.ru"
+
+# [[nodes]]
+# host = "term-02.rrcki.ru"
+# weight = 1.0
+# max_sessions = 40
+
+# Профили, которые увидит пользователь. Любые ключи профиля X2Go Client
+# (fullscreen, speed, sound, clipboard, rdpoptions, ...) передаются как есть.
+[[profiles]]
+id = "rrcki-desktop"
+name = "Рабочий стол РРЦКИ"
+command = "MATE"                   # или XFCE — под окружение на узлах
+fullscreen = true
+speed = 2
+sound = false
+clipboard = "both"

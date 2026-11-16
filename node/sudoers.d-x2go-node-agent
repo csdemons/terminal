@@ -1,0 +1,4 @@
+# /etc/sudoers.d/x2go-node-agent  (права 0440, проверка: visudo -cf /etc/sudoers.d/x2go-node-agent)
+# Локальный пользователь x2gobroker может выполнять только агент узла.
+Defaults:x2gobroker !requiretty
+x2gobroker ALL=(root) NOPASSWD: /usr/local/sbin/x2go-node-agent *

@@ -1,0 +1,4 @@
+# /home/x2gobroker/.ssh/authorized_keys на каждом узле фермы (одна строка).
+# Вместо ssh-ed25519 AAAA... подставьте содержимое /etc/rrcki-x2gobroker/node_key.pub с брокера,
+# вместо адресов — IP брокеров. Ключ может только вызвать агента, без shell и пробросов.
+restrict,from="10.0.0.11,10.0.0.12",command="sudo -n /usr/local/sbin/x2go-node-agent \"$SSH_ORIGINAL_COMMAND\"" ssh-ed25519 AAAA... rrcki-x2gobroker
